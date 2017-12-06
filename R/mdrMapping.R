@@ -1,0 +1,129 @@
+#' grepReads greps for cDNA or gDNA reads cause they are both grouped togehter in the assembly input
+#'
+#' @param reads the ShortRead class object
+#' @param type the pattern to look for
+#' @export
+#' @keywords internal
+grepReads = function(reads, type="cDNA")
+{
+    . ='shutup'
+    whichIsMRNA = ShortRead::id(reads) %>% as.character %>% grepl(type, .)
+    r = reads[whichIsMRNA] %>% sread
+    names(r) = ShortRead::id(reads[whichIsMRNA])
+    r
+}
+
+#' finds the location of the MDR on the contig
+#'
+#' finds the location of the MDR on the contig
+#'
+#' @param contigid the id of the contig
+#' @param seq character string of the contig from the MSA
+#' @param s starting loc
+#' @param e ending loc
+#' @export
+mapContig = function(contigid, seq, s, e)
+{
+    . = 'shutup'
+    mdr = seq %>% as.character %>% substr(s, e) %>% gsub("-", "", .)
+    full = seq %>% gsub("-", "", .)
+    matchStart = regexpr(mdr, full) %>% as.integer
+    matchLength = regexpr(mdr, full) %>% attr("match.length")
+    matchEnd = matchStart + matchLength
+    data.frame(
+        id = contigid,
+        matchStart = matchStart,
+        matchEnd = matchEnd
+    )
+}
+
+#' Returns contig ranges for those captured within the MDR
+#'
+#' Header for contigs
+#' contig00026 ref|YP_002288046.1| (ntRev) ## spanning:123 msaStart:653 msaEND:944 max10BPwindow:205.4 contigStart: 221 contigEnd: 421
+#' Give GRanges output with seqname ko|contig00001
+#'
+#' @param ko the KO of interest
+#' @param passDir path to pAss outputs
+#' @importFrom GenomicRanges GRanges
+#' @importFrom ShortRead readFasta sread
+#' @importFrom utils head read.csv read.table tail write.table
+#' @export
+#' @examples
+#' \dontrun{
+#' locsMDR = mdrRanges('K00927')
+#' }
+mdrRanges = function(ko, passDir)
+{
+    . = 'shutup'
+    mdrPath = sprintf("%s/pAss11/%s.fna", passDir, ko)
+    msaPath = sprintf("%s/pAss03/%s.msa", passDir, ko)
+
+    info = ShortRead::id(readFasta(mdrPath)) %>% head(n=1) %>% as.character
+    msa.starting = info %>% regexec("msaStart:(\\d+)",.) %>% regmatches(info, .) %>% unlist %>% tail(n=1) %>% as.integer
+    msa.ending = info %>% regexec("msaEND:(\\d+)",.) %>% regmatches(info, .) %>% unlist %>% tail(n=1) %>% as.integer
+
+    msa = readFasta(msaPath)
+
+    locs = mapply(mapContig, contigid = ShortRead::id(msa) %>% substr(1, 11), seq= lapply(sread(msa), function(x) x),
+    MoreArgs = list(s = msa.starting, e = msa.ending),
+    SIMPLIFY=FALSE
+    ) %>% do.call(rbind,.) %>% tbl_df
+    mdrContigs = ShortRead::id(readFasta(mdrPath)) %>% as.character %>% substr(1, 11)
+    locs = filter(locs, id %in% mdrContigs) %$% 
+    GRanges(seqnames = paste(ko, id, sep="|"), ranges = IRanges::IRanges(locs$matchStart, end=locs$matchEnd))
+}
+
+#' blatting
+#'
+#' performs blat
+#'
+#' @param ko the ko of interest
+#' @param type the
+#' @param newblerInput path to newbler dir eg. /root in /root/K0000X/input/K0000X.1.fq
+#' @export
+#'
+#' @importFrom ShortRead readFastq
+#' @importFrom GenomicRanges GRanges
+blatting = function(ko, type, newblerInput)
+{
+    . = 'shutup'
+    combined = lapply(c(1,2), function(readNum){
+        read = sprintf("%s/%s/input/%s.%s.fq", newblerInput, ko, ko, readNum)
+        if(file.exists(read))
+            read.fq = read %>% readFastq %>% grepReads(type)
+    }) %>% do.call(c,.)
+    contigs = sprintf("%s/%s/454AllContigs.fna", newblerInput, ko)
+    blast8 = combined %>% map(contigs) #map is a metamapsDB function
+    blatRanges = GRanges(seqnames=blast8$subject, ranges=IRanges::IRanges(blast8$newStart, blast8$newEnd), read=blast8$query)
+}
+
+
+#' overlaps
+#'
+#' calculates overlaps
+#'
+#' @param ko the ko of interest
+#' @param passDir the directory of the pass project folder
+#' @param newblerInput directory for newbler output files
+#' @importFrom GenomicRanges countOverlaps seqnames
+#' @importFrom dplyr tbl_df
+#' @export
+#' @examples
+#' \dontrun{
+#' mapReads2MDR('K00927', passDir="./out", newblerInput="./newbler2")
+#' }
+
+mapReads2MDR = function(ko, passDir, newblerInput)
+{
+    ko = gsub("^ko:", "", ko)
+    cDNA = blatting(ko, type="cDNA", newblerInput)
+    gDNA = blatting(ko, type="gDNA", newblerInput)
+    komdrRanges = mdrRanges(ko, passDir)
+    data.frame(
+        name = as.character(seqnames(komdrRanges)),
+        count.gDNA = countOverlaps(komdrRanges, gDNA),
+        count.cDNA = countOverlaps(komdrRanges, cDNA),
+        ko = ko
+    ) %>% tbl_df
+}
